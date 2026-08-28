@@ -46,7 +46,7 @@ jobs:
       ALL_ARCH_ITEM_JSON: '{"target":"x86","subtarget":"64","arch":"all"}'
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@v4
 
       - name: Build dynamic matrix
         id: build_matrix
@@ -63,8 +63,7 @@ jobs:
                 echo "Error: package '${PKG}' tidak ditemukan di root repository!"
                 exit 1
               fi
-              PACKAGES="${PACKAGES}${PKG}
-"
+              PACKAGES="${PACKAGES}${PKG}"$'\n'
             done
             PACKAGES=$(echo "$PACKAGES" | sed '/^$/d' | sort -u)
           fi
