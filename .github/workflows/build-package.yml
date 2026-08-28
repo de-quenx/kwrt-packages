@@ -1,0 +1,246 @@
+name: Build Package Multi-Arch
+
+on:
+  workflow_dispatch:
+    inputs:
+      package_name:
+        description: "Nama folder package, pisahkan dengan spasi atau koma untuk multi package, atau 'all' untuk build semua package"
+        required: true
+        default: "all"
+      package_version:
+        description: "Override PKG_VERSION di Makefile (kosongkan untuk auto-detect, diabaikan jika package_name=all atau lebih dari satu package)"
+        required: false
+        default: ""
+      release_tag:
+        description: "Tag untuk GitHub Release"
+        required: true
+        default: "x-wrt"
+
+permissions:
+  contents: write
+
+jobs:
+  setup:
+    runs-on: ubuntu-24.04
+    outputs:
+      matrix_include: ${{ steps.build_matrix.outputs.matrix_include }}
+    env:
+      OWRT_VERSIONS_JSON: |
+        [
+          {"version":"24.10.8","major":"24","ext":"ipk","url_prefix":"https://downloads.openwrt.org/releases/24.10.0/targets"},
+          {"version":"25.12.5","major":"25","ext":"apk","url_prefix":"https://downloads.openwrt.org/releases/25.12.0/targets"}
+        ]
+      ARCH_ITEMS_JSON: |
+        [
+          {"target":"sunxi","subtarget":"cortexa53","arch":"aarch64_cortex-a53"},
+          {"target":"rockchip","subtarget":"armv8","arch":"aarch64_generic"},
+          {"target":"sunxi","subtarget":"cortexa7","arch":"arm_cortex-a7"},
+          {"target":"bcm27xx","subtarget":"bcm2708","arch":"arm_arm1176jzf-s_vfp"},
+          {"target":"bcm27xx","subtarget":"bcm2709","arch":"arm_cortex-a7_neon-vfpv4"},
+          {"target":"bcm27xx","subtarget":"bcm2711","arch":"aarch64_cortex-a72"},
+          {"target":"bcm27xx","subtarget":"bcm2712","arch":"aarch64_cortex-a76"},
+          {"target":"mvebu","subtarget":"cortexa9","arch":"arm_cortex-a9"},
+          {"target":"x86","subtarget":"64","arch":"x86_64"},
+          {"target":"x86","subtarget":"generic","arch":"i386_pentium4"}
+        ]
+      ALL_ARCH_ITEM_JSON: '{"target":"x86","subtarget":"64","arch":"all"}'
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Build dynamic matrix
+        id: build_matrix
+        run: |
+          RAW_PACKAGE_NAME="${{ inputs.package_name }}"
+          NORMALIZED=$(echo "$RAW_PACKAGE_NAME" | tr ',' ' ' | xargs)
+
+          if [ "$NORMALIZED" = "all" ]; then
+            PACKAGES=$(find . -mindepth 2 -maxdepth 2 -name Makefile | sed 's|^\./||; s|/Makefile$||' | sort -u)
+          else
+            PACKAGES=""
+            for PKG in $NORMALIZED; do
+              if [ ! -f "${PKG}/Makefile" ]; then
+                echo "Error: package '${PKG}' tidak ditemukan di root repository!"
+                exit 1
+              fi
+              PACKAGES="${PACKAGES}${PKG}
+"
+            done
+            PACKAGES=$(echo "$PACKAGES" | sed '/^$/d' | sort -u)
+          fi
+
+          echo "$OWRT_VERSIONS_JSON" > /tmp/owrt.json
+          echo "$ARCH_ITEMS_JSON" > /tmp/arch.json
+          echo "$ALL_ARCH_ITEM_JSON" > /tmp/all_arch.json
+
+          INCLUDE="[]"
+          while IFS= read -r PKG; do
+            [ -z "$PKG" ] && continue
+            if grep -qE '^[[:space:]]*LUCI_PKGARCH[[:space:]]*:=[[:space:]]*all[[:space:]]*$' "${PKG}/Makefile" 2>/dev/null; then
+              ARCHES=$(jq -c '[.]' /tmp/all_arch.json)
+            else
+              ARCHES=$(cat /tmp/arch.json)
+            fi
+            ENTRIES=$(jq -c -n --arg pkg "$PKG" --argjson owrts "$(cat /tmp/owrt.json)" --argjson arches "$ARCHES" \
+              '[ $owrts[] as $o | $arches[] as $a | {package:$pkg, owrt:$o, arch_item:$a} ]')
+            INCLUDE=$(jq -c -n --argjson x "$INCLUDE" --argjson y "$ENTRIES" '$x + $y')
+          done <<< "$PACKAGES"
+
+          echo "matrix_include=$INCLUDE" >> $GITHUB_OUTPUT
+          echo "Total build jobs: $(echo "$INCLUDE" | jq length)"
+
+  build:
+    needs: setup
+    name: Build ${{ matrix.package }} - OpenWrt ${{ matrix.owrt.major }} (${{ matrix.arch_item.arch }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    env:
+      PACKAGE_NAME: ${{ matrix.package }}
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJson(needs.setup.outputs.matrix_include) }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential clang flex bison gawk gettext git \
+            libncurses-dev libssl-dev python3 rsync unzip wget zstd
+
+      - name: Resolve package version
+        run: |
+          NORMALIZED=$(echo "${{ inputs.package_name }}" | tr ',' ' ' | xargs)
+          PKG_COUNT=$(echo "$NORMALIZED" | wc -w)
+
+          if [ -n "${{ inputs.package_version }}" ] && [ "$NORMALIZED" != "all" ] && [ "$PKG_COUNT" = "1" ]; then
+            VERSION="${{ inputs.package_version }}"
+          else
+            VERSION=$(grep -m1 '^PKG_VERSION:=' "${PACKAGE_NAME}/Makefile" | cut -d'=' -f2 | tr -d ' \r\n')
+            if [ -z "$VERSION" ]; then
+              VERSION="1.0.0"
+            fi
+          fi
+          RELEASE=$(grep -m1 '^PKG_RELEASE:=' "${PACKAGE_NAME}/Makefile" | cut -d'=' -f2 | tr -d ' \r\n')
+          if [ -z "$RELEASE" ]; then
+            RELEASE="1"
+          fi
+          echo "APP_VERSION=$VERSION" >> $GITHUB_ENV
+          echo "APP_RELEASE=$RELEASE" >> $GITHUB_ENV
+          echo "Building $PACKAGE_NAME version $VERSION release $RELEASE"
+
+      - name: Sync App Version to Repository Makefile
+        run: |
+          if [ -f "${PACKAGE_NAME}/Makefile" ]; then
+            sed -i "s/^PKG_VERSION:=.*/PKG_VERSION:=$APP_VERSION/" "${PACKAGE_NAME}/Makefile"
+          fi
+
+      - name: Download OpenWrt SDK
+        run: |
+          SDK_BASE="${{ matrix.owrt.url_prefix }}/${{ matrix.arch_item.target }}/${{ matrix.arch_item.subtarget }}/"
+          SDK_FILE=$(wget -qO- "$SDK_BASE" | grep -o 'openwrt-sdk[^"]*Linux-x86_64.tar.zst' | head -n1)
+          if [ -z "$SDK_FILE" ]; then
+            echo "Error: SDK tidak ditemukan di $SDK_BASE"
+            exit 1
+          fi
+          wget "${SDK_BASE}${SDK_FILE}"
+
+      - name: Extract SDK
+        run: |
+          tar --zstd -xf openwrt-sdk-*.tar.zst
+          SDK_DIR=$(find . -maxdepth 1 -type d -name "openwrt-sdk-*")
+          mv "$SDK_DIR" sdk
+
+      - name: Restore dl cache
+        uses: actions/cache@v4
+        with:
+          path: sdk/dl
+          key: dl-${{ matrix.owrt.major }}-${{ matrix.arch_item.arch }}-${{ matrix.package }}
+
+      - name: Copy package to SDK
+        run: |
+          cp -a "${PACKAGE_NAME}" sdk/package/
+
+      - name: Configure SDK & Set Version
+        working-directory: sdk
+        run: |
+          sed -i "s/^PKG_VERSION:=.*/PKG_VERSION:=$APP_VERSION/" "package/${PACKAGE_NAME}/Makefile"
+          echo "CONFIG_PACKAGE_${PACKAGE_NAME}=y" >> .config
+          make defconfig
+
+      - name: Compile Package
+        working-directory: sdk
+        run: |
+          make package/${PACKAGE_NAME}/{clean,compile} -j$(nproc) V=s
+
+      - name: Prepare Release Artifacts
+        run: |
+          mkdir -p release
+          PKG=$(find sdk/bin/packages/ -type f -name "${PACKAGE_NAME}[-_]*.${{ matrix.owrt.ext }}" 2>/dev/null | sort | head -n 1)
+          if [ -z "$PKG" ]; then
+            PKG=$(find sdk/bin/ -type f -name "${PACKAGE_NAME}[-_]*.${{ matrix.owrt.ext }}" 2>/dev/null | sort | head -n 1)
+          fi
+          if [ -z "$PKG" ]; then
+            echo "Error: file ${PACKAGE_NAME}*.${{ matrix.owrt.ext }} tidak ditemukan!"
+            echo "Daftar file .${{ matrix.owrt.ext }} yang tersedia di sdk/bin (untuk debugging):"
+            find sdk/bin/ -type f -name "*.${{ matrix.owrt.ext }}" 2>/dev/null || true
+            exit 1
+          fi
+
+          if [ "${{ matrix.owrt.ext }}" = "apk" ]; then
+            if [ "${{ matrix.arch_item.arch }}" = "all" ]; then
+              CUSTOM_NAME="${PACKAGE_NAME}-${APP_VERSION}-r${APP_RELEASE}.apk"
+            else
+              CUSTOM_NAME="${PACKAGE_NAME}-${APP_VERSION}-r${APP_RELEASE}_${{ matrix.arch_item.arch }}.apk"
+            fi
+          else
+            CUSTOM_NAME="${PACKAGE_NAME}_${APP_VERSION}-r${APP_RELEASE}_${{ matrix.arch_item.arch }}.ipk"
+          fi
+
+          cp "$PKG" "release/$CUSTOM_NAME"
+          echo "Package hasil build : $PKG"
+          echo "Nama file rilis     : release/$CUSTOM_NAME"
+          ls -lh release/
+
+      - name: Upload Artifacts per Matrix
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.package }}-${{ matrix.owrt.major }}-${{ matrix.arch_item.arch }}
+          path: release/*
+
+  release:
+    needs: [setup, build]
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: all-artifacts
+          merge-multiple: true
+
+      - name: Display downloaded files
+        run: ls -lh all-artifacts/
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.release_tag }}
+          name: ${{ inputs.release_tag }}
+          body: |
+            # STABIL - Optimal Performance 🚀
+            ---
+            ### Arsitektur & Versi yang Tersedia:
+            - **OpenWrt 24.x** (`.ipk`)
+            - **OpenWrt 25.x** (`.apk`)
+          draft: false
+          prerelease: false
+          make_latest: true
+          overwrite_files: false
+          files: all-artifacts/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
