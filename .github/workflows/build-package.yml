@@ -161,9 +161,24 @@ jobs:
           path: sdk/dl
           key: dl-${{ matrix.owrt.major }}-${{ matrix.arch_item.arch }}-${{ matrix.package }}
 
+      - name: Restore feeds cache
+        uses: actions/cache@v4
+        with:
+          path: sdk/feeds
+          key: feeds-${{ matrix.owrt.major }}-${{ hashFiles('sdk/feeds.conf.default') }}
+
       - name: Copy package to SDK
         run: |
           cp -a "${PACKAGE_NAME}" sdk/package/
+
+      - name: Setup Required Feeds
+        working-directory: sdk
+        run: |
+          FEED_NAMES=$(grep -ohE 'feeds/[a-zA-Z0-9_-]+' "package/${PACKAGE_NAME}/Makefile" | cut -d'/' -f2 | sort -u)
+          for FEED_NAME in $FEED_NAMES; do
+            ./scripts/feeds update "$FEED_NAME"
+            ./scripts/feeds install -a -p "$FEED_NAME"
+          done
 
       - name: Configure SDK & Set Version
         working-directory: sdk
@@ -214,18 +229,30 @@ jobs:
 
   release:
     needs: [setup, build]
+    if: ${{ !cancelled() && needs.build.result != 'skipped' }}
     runs-on: ubuntu-24.04
     steps:
       - name: Download all artifacts
         uses: actions/download-artifact@v4
+        continue-on-error: true
         with:
           path: all-artifacts
           merge-multiple: true
 
       - name: Display downloaded files
-        run: ls -lh all-artifacts/
+        run: mkdir -p all-artifacts && ls -lh all-artifacts/
+
+      - name: Check Artifacts
+        id: check_artifacts
+        run: |
+          if [ -z "$(find all-artifacts -type f 2>/dev/null)" ]; then
+            echo "found=false" >> $GITHUB_OUTPUT
+          else
+            echo "found=true" >> $GITHUB_OUTPUT
+          fi
 
       - name: Create GitHub Release
+        if: steps.check_artifacts.outputs.found == 'true'
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ inputs.release_tag }}
