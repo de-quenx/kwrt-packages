@@ -7,9 +7,19 @@ on:
         description: "URL atau owner/repo sumber (contoh: https://github.com/user/repoA.git atau user/repoA)"
         required: true
         type: string
+      source_branch:
+        description: "Branch repository sumber"
+        required: false
+        default: "main"
+        type: string
       target_url:
         description: "URL atau owner/repo tujuan (contoh: https://github.com/user/repoB.git atau user/repoB)"
         required: true
+        type: string
+      target_branch:
+        description: "Branch repository tujuan"
+        required: false
+        default: "main"
         type: string
       commit_message:
         description: "Pesan commit"
@@ -50,7 +60,7 @@ jobs:
           if [ -n "$SOURCE_TOKEN" ]; then
             SOURCE_URL=$(echo "$SOURCE_URL" | sed "s#https://#https://x-access-token:${SOURCE_TOKEN}@#")
           fi
-          git clone --branch main --single-branch --depth 1 "$SOURCE_URL" source-repo
+          git clone --branch "${{ inputs.source_branch }}" --single-branch --depth 1 "$SOURCE_URL" source-repo
 
       - name: Clone Repository Tujuan
         env:
@@ -63,12 +73,12 @@ jobs:
           if [ -n "$TARGET_TOKEN" ]; then
             TARGET_URL=$(echo "$TARGET_URL" | sed "s#https://#https://x-access-token:${TARGET_TOKEN}@#")
           fi
-          if git ls-remote --exit-code --heads "$TARGET_URL" main > /dev/null 2>&1; then
-            git clone --branch main --single-branch --depth 1 "$TARGET_URL" target-repo
+          if git ls-remote --exit-code --heads "$TARGET_URL" "${{ inputs.target_branch }}" > /dev/null 2>&1; then
+            git clone --branch "${{ inputs.target_branch }}" --single-branch --depth 1 "$TARGET_URL" target-repo
           else
             git clone --depth 1 "$TARGET_URL" target-repo
             cd target-repo
-            git checkout -b main
+            git checkout -b "${{ inputs.target_branch }}"
           fi
 
       - name: Validasi Direktori Sumber
@@ -111,4 +121,4 @@ jobs:
             exit 0
           fi
           git commit -m "${{ inputs.commit_message }}"
-          git push origin HEAD:main
+          git push origin HEAD:"${{ inputs.target_branch }}"
