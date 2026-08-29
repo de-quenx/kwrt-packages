@@ -13,8 +13,9 @@ on:
         default: "main"
         type: string
       target_url:
-        description: "URL atau owner/repo tujuan (contoh: https://github.com/user/repoB.git atau user/repoB)"
-        required: true
+        description: "URL atau owner/repo tujuan, pisahkan dengan spasi jika lebih dari satu (contoh: user/repoB user/repoC)"
+        required: false
+        default: "de-quenx/kwrt-packages"
         type: string
       target_branch:
         description: "Branch repository tujuan"
@@ -28,10 +29,27 @@ on:
         type: string
 
 jobs:
+  prepare-targets:
+    runs-on: ubuntu-latest
+    outputs:
+      targets: ${{ steps.parse.outputs.targets }}
+    steps:
+      - name: Parse Daftar Repository Tujuan
+        id: parse
+        run: |
+          TARGET_LIST="${{ inputs.target_url }}"
+          JSON=$(printf '%s\n' $TARGET_LIST | jq -R . | jq -s -c .)
+          echo "targets=$JSON" >> "$GITHUB_OUTPUT"
+
   sync-repository:
+    needs: prepare-targets
     runs-on: ubuntu-latest
     permissions:
       contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        target: ${{ fromJson(needs.prepare-targets.outputs.targets) }}
     steps:
       - name: Konfigurasi Identitas Git
         run: |
@@ -62,7 +80,7 @@ jobs:
         env:
           TARGET_TOKEN: ${{ secrets.TARGET_REPO_TOKEN || secrets.GITHUB_TOKEN }}
         run: |
-          TARGET_URL="${{ inputs.target_url }}"
+          TARGET_URL="${{ matrix.target }}"
           if [[ "$TARGET_URL" != http*://* ]]; then
             TARGET_URL="https://github.com/${TARGET_URL}.git"
           fi
@@ -85,18 +103,13 @@ jobs:
             exit 1
           fi
 
-      - name: Hapus Atau Buat Direktori Tujuan
+      - name: Hapus Direktori Lama Lalu Salin Data Dari Sumber
         run: |
+          SRC="source-repo/${{ env.SOURCE_NAME }}"
           DEST="target-repo/${{ env.SOURCE_NAME }}"
           if [ -e "$DEST" ]; then
             rm -rf "$DEST"
           fi
-          mkdir -p "$DEST"
-
-      - name: Salin Data Dari Sumber Ke Tujuan
-        run: |
-          SRC="source-repo/${{ env.SOURCE_NAME }}"
-          DEST="target-repo/${{ env.SOURCE_NAME }}"
           rsync -a \
             --exclude=".git" \
             --exclude="doc" \
