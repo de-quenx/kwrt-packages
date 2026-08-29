@@ -41,13 +41,9 @@ jobs:
       - name: Tentukan Nama Direktori
         run: |
           SOURCE_INPUT="${{ inputs.source_url }}"
-          TARGET_INPUT="${{ inputs.target_url }}"
           SOURCE_INPUT="${SOURCE_INPUT%/}"
-          TARGET_INPUT="${TARGET_INPUT%/}"
           SOURCE_NAME=$(basename "$SOURCE_INPUT" .git)
-          TARGET_NAME=$(basename "$TARGET_INPUT" .git)
           echo "SOURCE_NAME=$SOURCE_NAME" >> "$GITHUB_ENV"
-          echo "TARGET_NAME=$TARGET_NAME" >> "$GITHUB_ENV"
 
       - name: Clone Repository Sumber
         env:
@@ -91,7 +87,7 @@ jobs:
 
       - name: Hapus Atau Buat Direktori Tujuan
         run: |
-          DEST="target-repo/${{ env.TARGET_NAME }}"
+          DEST="target-repo/${{ env.SOURCE_NAME }}"
           if [ -e "$DEST" ]; then
             rm -rf "$DEST"
           fi
@@ -100,7 +96,7 @@ jobs:
       - name: Salin Data Dari Sumber Ke Tujuan
         run: |
           SRC="source-repo/${{ env.SOURCE_NAME }}"
-          DEST="target-repo/${{ env.TARGET_NAME }}"
+          DEST="target-repo/${{ env.SOURCE_NAME }}"
           rsync -a \
             --exclude=".git" \
             --exclude="doc" \
